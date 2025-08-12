@@ -51,10 +51,11 @@ tensorboard-data-server==0.7.2
 tifffile==2025.5.10
 tomli==2.2.1
 torch==2.8.0
-torchvision==0.23.0
+torchvision==0.14.1
 tqdm==4.67.1
 typing_extensions==4.14.1
 urllib3==2.5.0
 Werkzeug==3.1.3
 yapf==0.43.0
+
 
