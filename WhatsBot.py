@@ -5,8 +5,7 @@ from flask import Flask, request, jsonify, send_file
 from io import BytesIO
 import cv2
 import numpy as np
-from basicsr.archs.rrdbnet_arch import RRDBNet
-from gfpgan import GFPGANer
+import gc
 
 # ===== Environment Variables =====
 VERIFY_TOKEN = os.environ["VERIFY_TOKEN"]
@@ -16,7 +15,6 @@ GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
 TEMPLATE_NAME = os.getenv("TEMPLATE_NAME", "send_photo")
 
 # ===== Model Path =====
-# Stored on Render persistent disk
 MODEL_PATH = os.getenv("MODEL_PATH", "/opt/render/project/src/models/GFPGANv1.4.pth")
 
 UPLOAD_FOLDER = "/tmp/whatsapp_images"
@@ -25,16 +23,24 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 # ===== Flask App =====
 app = Flask(__name__)
 
-# ===== Initialize GFPGAN at Startup =====
-print(f"Loading GFPGAN model from {MODEL_PATH}...")
-gfpganer = GFPGANer(
-    model_path=MODEL_PATH,
-    upscale=1,
-    arch='clean',
-    channel_multiplier=2,
-    bg_upsampler=None
-)
-print("GFPGAN model loaded successfully.")
+# ===== Lazy GFPGAN Loader =====
+gfpganer = None
+
+def get_gfpganer():
+    """Load GFPGAN model into memory only when needed."""
+    global gfpganer
+    if gfpganer is None:
+        print(f"Loading GFPGAN model from {MODEL_PATH}...")
+        from gfpgan import GFPGANer
+        gfpganer = GFPGANer(
+            model_path=MODEL_PATH,
+            upscale=1,
+            arch='clean',
+            channel_multiplier=2,
+            bg_upsampler=None
+        )
+        print("GFPGAN model loaded successfully.")
+    return gfpganer
 
 # ===== WhatsApp API Helpers =====
 def upload_media(file_path):
@@ -94,10 +100,17 @@ def enhance_image_bytes(image_bytes):
     if img is None:
         raise ValueError("Invalid image file.")
 
-    _, _, restored_img = gfpganer.enhance(
+    _, _, restored_img = get_gfpganer().enhance(
         img, has_aligned=False, only_center_face=False, paste_back=True
     )
     _, buffer = cv2.imencode('.jpg', restored_img)
+
+    # OPTIONAL: Free RAM after processing (slower, but avoids OOM)
+    # global gfpganer
+    # del gfpganer
+    # gfpganer = None
+    # gc.collect()
+
     return buffer
 
 # ===== API: Enhance Only =====
