@@ -2,62 +2,21 @@ import os
 import requests
 import mimetypes
 from flask import Flask, request, jsonify
-import cv2
-import numpy as np
-from io import BytesIO
 
-# ===== Environment Variables =====
+# Environment variables
 VERIFY_TOKEN = os.environ["VERIFY_TOKEN"]
 WHATSAPP_TOKEN = os.environ["WHATSAPP_TOKEN"]
 PHONE_NUMBER_ID = os.environ["PHONE_NUMBER_ID"]
 GRAPH_VERSION = os.getenv("GRAPH_VERSION", "v21.0")
-TEMPLATE_NAME = os.getenv("TEMPLATE_NAME", "send_photo")  # must match exactly in Meta
-LANGUAGE_CODE = os.getenv("LANGUAGE_CODE", "en")  # must match template language
-
-# ===== Model Path =====
-MODEL_PATH = os.getenv("MODEL_PATH", "/opt/render/project/src/models/GFPGANv1.4.pth")
+TEMPLATE_NAME = os.getenv("TEMPLATE_NAME", "send_photo")  # your approved template name
 
 UPLOAD_FOLDER = "/tmp/whatsapp_images"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# ===== Flask App =====
 app = Flask(__name__)
 
-# ===== Lazy GFPGAN Loader =====
-gfpganer = None
+# ---- WhatsApp API helpers ---- #
 
-def get_gfpganer():
-    """Load GFPGAN model into memory only when needed."""
-    global gfpganer
-    if gfpganer is None:
-        print(f"Loading GFPGAN model from {MODEL_PATH}...")
-        from gfpgan import GFPGANer
-        gfpganer = GFPGANer(
-            model_path=MODEL_PATH,
-            upscale=1,
-            arch='clean',
-            channel_multiplier=2,
-            bg_upsampler=None
-        )
-        print("GFPGAN model loaded successfully.")
-    return gfpganer
-
-def enhance_image_bytes(image_bytes):
-    """Enhance image using GFPGAN and return enhanced image bytes."""
-    img_array = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Invalid image file.")
-
-    _, _, restored_img = get_gfpganer().enhance(
-        img, has_aligned=False, only_center_face=False, paste_back=True
-    )
-    success, buffer = cv2.imencode('.jpg', restored_img)
-    if not success or buffer is None or len(buffer) < 1000:
-        raise ValueError("Enhanced image is empty or invalid.")
-    return buffer
-
-# ===== WhatsApp API Helpers =====
 def upload_media(file_path):
     """Uploads media to WhatsApp and returns media_id."""
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/media"
@@ -85,7 +44,7 @@ def send_template_with_media_id(to_number, media_id, name_param):
         "type": "template",
         "template": {
             "name": TEMPLATE_NAME,
-            "language": {"code": LANGUAGE_CODE},
+            "language": {"code": "en"},
             "components": [
                 {
                     "type": "header",
@@ -107,11 +66,12 @@ def send_template_with_media_id(to_number, media_id, name_param):
     resp.raise_for_status()
     return resp.json()
 
-# ===== API: Enhance + Send to WhatsApp =====
+# ---- API endpoint ---- #
+
 @app.route("/send-image", methods=["POST"])
 def send_image():
     """
-    Enhances image and sends it instantly via WhatsApp template.
+    Upload image and send it instantly via template.
     Required form fields:
       file: image file
       to: recipient phone number (international format, no +)
@@ -124,18 +84,13 @@ def send_image():
     user_name = request.form["name"].strip()
     file = request.files["file"]
 
-    save_path = os.path.join(UPLOAD_FOLDER, f"enhanced_{phone_number}.jpg")
+    # Save file temporarily
+    save_path = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(save_path)
 
     try:
-        # Enhance and save
-        enhanced_bytes = enhance_image_bytes(file.read())
-        with open(save_path, "wb") as f:
-            f.write(enhanced_bytes)
-
-        # Upload and send via WhatsApp
         media_id = upload_media(save_path)
         result = send_template_with_media_id(phone_number, media_id, user_name)
-
         return jsonify(result)
     except Exception as e:
         return jsonify(error=str(e)), 500
@@ -143,7 +98,8 @@ def send_image():
         if os.path.exists(save_path):
             os.remove(save_path)
 
-# ===== Webhook Verification =====
+# ---- Webhook verification ---- #
+
 @app.route("/webhook", methods=["GET"])
 def verify():
     mode = request.args.get("hub.mode")
@@ -153,7 +109,7 @@ def verify():
         return challenge, 200
     return "Forbidden", 403
 
-# ===== Main =====
+# ---- Main ---- #
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=8000)
