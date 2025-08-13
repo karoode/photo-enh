@@ -1,12 +1,10 @@
 import os
 import requests
 import mimetypes
-from flask import Flask, request, jsonify, send_file
-from io import BytesIO
+from flask import Flask, request, jsonify
 import cv2
 import numpy as np
-import gc
-import json
+from io import BytesIO
 
 # ===== Environment Variables =====
 VERIFY_TOKEN = os.environ["VERIFY_TOKEN"]
@@ -43,6 +41,21 @@ def get_gfpganer():
         )
         print("GFPGAN model loaded successfully.")
     return gfpganer
+
+def enhance_image_bytes(image_bytes):
+    """Enhance image using GFPGAN and return enhanced image bytes."""
+    img_array = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+    if img is None:
+        raise ValueError("Invalid image file.")
+
+    _, _, restored_img = get_gfpganer().enhance(
+        img, has_aligned=False, only_center_face=False, paste_back=True
+    )
+    success, buffer = cv2.imencode('.jpg', restored_img)
+    if not success or buffer is None or len(buffer) < 1000:
+        raise ValueError("Enhanced image is empty or invalid.")
+    return buffer
 
 # ===== WhatsApp API Helpers =====
 def upload_media(file_path):
@@ -94,35 +107,16 @@ def send_template_with_media_id(to_number, media_id, name_param):
     resp.raise_for_status()
     return resp.json()
 
-# ===== Image Enhancement =====
-def enhance_image_bytes(image_bytes):
-    """Enhance image using GFPGAN and return enhanced image bytes."""
-    img_array = np.frombuffer(image_bytes, np.uint8)
-    img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-    if img is None:
-        raise ValueError("Invalid image file.")
-
-    _, _, restored_img = get_gfpganer().enhance(
-        img, has_aligned=False, only_center_face=False, paste_back=True
-    )
-    _, buffer = cv2.imencode('.jpg', restored_img)
-    return buffer
-
-# ===== API: Enhance Only =====
-@app.route("/enhance", methods=["POST"])
-def enhance_endpoint():
-    if "image" not in request.files:
-        return jsonify(error="Missing 'image' file"), 400
-    file = request.files["image"]
-    try:
-        enhanced_bytes = enhance_image_bytes(file.read())
-        return send_file(BytesIO(enhanced_bytes), mimetype="image/jpeg")
-    except Exception as e:
-        return jsonify(error=str(e)), 500
-
 # ===== API: Enhance + Send to WhatsApp =====
 @app.route("/send-image", methods=["POST"])
 def send_image():
+    """
+    Enhances image and sends it instantly via WhatsApp template.
+    Required form fields:
+      file: image file
+      to: recipient phone number (international format, no +)
+      name: name placeholder for template
+    """
     if "file" not in request.files or "to" not in request.form or "name" not in request.form:
         return jsonify(error="Missing file, to, or name"), 400
 
@@ -130,12 +124,15 @@ def send_image():
     user_name = request.form["name"].strip()
     file = request.files["file"]
 
+    save_path = os.path.join(UPLOAD_FOLDER, f"enhanced_{phone_number}.jpg")
+
     try:
+        # Enhance and save
         enhanced_bytes = enhance_image_bytes(file.read())
-        save_path = os.path.join(UPLOAD_FOLDER, f"enhanced_{phone_number}.jpg")
         with open(save_path, "wb") as f:
             f.write(enhanced_bytes)
 
+        # Upload and send via WhatsApp
         media_id = upload_media(save_path)
         result = send_template_with_media_id(phone_number, media_id, user_name)
 
@@ -143,10 +140,10 @@ def send_image():
     except Exception as e:
         return jsonify(error=str(e)), 500
     finally:
-        if 'save_path' in locals() and os.path.exists(save_path):
+        if os.path.exists(save_path):
             os.remove(save_path)
 
-# ===== Webhook Verification (GET) =====
+# ===== Webhook Verification =====
 @app.route("/webhook", methods=["GET"])
 def verify():
     mode = request.args.get("hub.mode")
@@ -156,26 +153,7 @@ def verify():
         return challenge, 200
     return "Forbidden", 403
 
-# ===== Webhook Message Receiver (POST) =====
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-    print("Incoming webhook:", json.dumps(data, indent=2))
-
-    # Example: Auto-reply if an image is sent (optional)
-    try:
-        if "messages" in data["entry"][0]["changes"][0]["value"]:
-            msg = data["entry"][0]["changes"][0]["value"]["messages"][0]
-            from_number = msg["from"]
-            # Here you could process incoming media...
-            print(f"Message from {from_number}: {msg}")
-    except Exception as e:
-        print("Webhook processing error:", e)
-
-    return "EVENT_RECEIVED", 200
-
 # ===== Main =====
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     app.run(host="0.0.0.0", port=port)
-
