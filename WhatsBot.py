@@ -33,6 +33,8 @@ def upload_media(file_path):
 
 def send_template_with_media_id(to_number, media_id, name_param):
     """Send approved template with uploaded image."""
+    if not name_param:
+        name_param = "User"
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages"
     headers = {
         "Authorization": f"Bearer {WHATSAPP_TOKEN}",
@@ -75,13 +77,14 @@ def send_image():
     Required form fields:
       file: image file
       to: recipient phone number (international format, no +)
-      name: name placeholder for template
+    Optional:
+      name: name placeholder for template (defaults to "User" if missing/empty)
     """
-    if "file" not in request.files or "to" not in request.form or "name" not in request.form:
-        return jsonify(error="Missing file, to, or name"), 400
+    if "file" not in request.files or "to" not in request.form:
+        return jsonify(error="Missing file or to"), 400
 
     phone_number = request.form["to"].strip()
-    user_name = request.form["name"].strip()
+    user_name = (request.form.get("name") or "").strip()
     file = request.files["file"]
 
     # Save file temporarily
@@ -90,13 +93,15 @@ def send_image():
 
     try:
         media_id = upload_media(save_path)
-        result = send_template_with_media_id(phone_number, media_id, user_name)
+        result = send_template_with_media_id(phone_number, media_id, user_name or "User")
         return jsonify(result)
     except Exception as e:
         return jsonify(error=str(e)), 500
     finally:
-        if os.path.exists(save_path):
+        try:
             os.remove(save_path)
+        except Exception:
+            pass
 
 # ---- Webhook verification ---- #
 
