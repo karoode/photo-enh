@@ -232,7 +232,7 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return wrapper
 
-# ========= Admin Panel (ثيم فاتح + إصلاح الأقواس) =========
+# ========= Admin Panel (ثيم فاتح + إصلاح الأقواس/الباك-سلاش) =========
 @app.route("/")
 def root_redirect():
     return redirect(url_for("admin_panel"))
@@ -308,7 +308,7 @@ def admin_panel():
                 </tr>
               </thead>
               <tbody>
-                {''.join(f"<tr><td>{r['ts']}</td><td>{r['phone']}</td><td>{(r['name'] or '')}</td></tr>" for r in rows) or '<tr><td colspan="3" class=\"text-muted\">لا توجد بيانات بعد اليوم.</td></tr>'}
+                {''.join(f"<tr><td>{r['ts']}</td><td>{r['phone']}</td><td>{(r['name'] or '')}</td></tr>" for r in rows) or '<tr><td colspan="3" class="text-muted">لا توجد بيانات بعد اليوم.</td></tr>'}
               </tbody>
             </table>
           </div>
