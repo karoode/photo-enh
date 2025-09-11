@@ -21,7 +21,7 @@ PHONE_NUMBER_ID  = _must_env("PHONE_NUMBER_ID")
 GRAPH_VERSION    = os.getenv("GRAPH_VERSION", "v21.0")
 TEMPLATE_NAME    = os.getenv("TEMPLATE_NAME", "send_photo")
 
-# Admin panel auth (لا قيم افتراضية هنا لأمان أعلى)
+# Admin panel auth (من البيئة فقط)
 ADMIN_USERNAME   = _must_env("ADMIN_USERNAME")
 ADMIN_PASSWORD   = _must_env("ADMIN_PASSWORD")
 
@@ -33,7 +33,7 @@ UPLOAD_FOLDER    = "/tmp/whatsapp_images"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # مسار القرص الدائم على Render
-DISK_MOUNT_PATH  = os.getenv("DISK_MOUNT_PATH", "/var/data")  # عدّل عند إنشاء القرص
+DISK_MOUNT_PATH  = os.getenv("DISK_MOUNT_PATH", "/var/data")
 DB_FILE_NAME     = os.getenv("DB_FILE_NAME", "whatsapp_stats.db")
 DB_PATH          = os.path.join(DISK_MOUNT_PATH, DB_FILE_NAME)
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
@@ -76,7 +76,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS sent_images (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts TEXT NOT NULL,     -- ISO timestamp
-            day TEXT NOT NULL,    -- YYYY-MM-DD (حسب التوقيت المحلي)
+            day TEXT NOT NULL,    -- YYYY-MM-DD
             phone TEXT NOT NULL,
             name TEXT
         )
@@ -232,7 +232,7 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return wrapper
 
-# ========= Admin Panel =========
+# ========= Admin Panel (ثيم فاتح + إصلاح الأقواس) =========
 @app.route("/")
 def root_redirect():
     return redirect(url_for("admin_panel"))
@@ -253,12 +253,12 @@ def admin_panel():
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <style>
-    body {{ background:#0f1220; color:#eaeaf2; }}
-    .card {{ background:#1a1f36; border:none; }}
-    .table thead th {{ color:#9aa4bd; }}
-    .muted {{ color:#9aa4bd; font-size:0.9rem; }}
-    a, a:visited {{ color:#8ab4ff; }}
-    .chip {{ background:#2a2f45; border-radius:999px; padding:.25rem .75rem; display:inline-block; }}
+    body {{ background:#f4f6fb; color:#111827; }}
+    .card {{ background:#ffffff; border:1px solid #e5e7eb; }}
+    .table thead th {{ color:#374151; }}
+    .muted {{ color:#6b7280; font-size:0.9rem; }}
+    a, a:visited {{ color:#2563eb; }}
+    .chip {{ background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; border-radius:999px; padding:.25rem .75rem; display:inline-block; }}
   </style>
 </head>
 <body class="p-3 p-md-4">
@@ -299,8 +299,8 @@ def admin_panel():
             <span class="chip">{count_today} عملية</span>
           </div>
           <div class="table-responsive mt-3">
-            <table class="table table-dark table-hover align-middle">
-              <thead>
+            <table class="table table-hover align-middle">
+              <thead class="table-light">
                 <tr>
                   <th style="width: 220px;">الوقت</th>
                   <th style="width: 220px;">الرقم</th>
@@ -308,7 +308,7 @@ def admin_panel():
                 </tr>
               </thead>
               <tbody>
-                {''.join(f"<tr><td>{{r['ts']}}</td><td>{{r['phone']}}</td><td>{{(r['name'] or '')}}</td></tr>" for r in rows) or '<tr><td colspan="3" class="muted">لا توجد بيانات بعد اليوم.</td></tr>'}
+                {''.join(f"<tr><td>{r['ts']}</td><td>{r['phone']}</td><td>{(r['name'] or '')}</td></tr>" for r in rows) or '<tr><td colspan="3" class=\"text-muted\">لا توجد بيانات بعد اليوم.</td></tr>'}
               </tbody>
             </table>
           </div>
@@ -324,7 +324,6 @@ async function loadDaily() {{
   const data = await res.json();
   const labels = data.map(d => d.day);
   const counts = data.map(d => d.count);
-
   const ctx = document.getElementById('dailyChart').getContext('2d');
   new Chart(ctx, {{
     type: 'bar',
@@ -341,8 +340,8 @@ async function loadDaily() {{
         legend: {{ display: false }}
       }},
       scales: {{
-        x: {{ ticks: {{ color: '#c7d2fe' }} }},
-        y: {{ ticks: {{ color: '#c7d2fe' }}, beginAtZero: true, precision: 0 }}
+        x: {{ ticks: {{ color: '#111827' }} }},
+        y: {{ ticks: {{ color: '#111827' }}, beginAtZero: true, precision: 0 }}
       }}
     }}
   }});
