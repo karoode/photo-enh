@@ -4,8 +4,9 @@ import mimetypes
 import sqlite3
 from datetime import datetime
 from functools import wraps
+import re
 
-from flask import Flask, request, jsonify, Response, g, redirect, url_for
+from flask import Flask, request, jsonify, Response, g, redirect, url_for, abort
 
 # ========= Environment variables (بدون قيم صلبة في الكود) =========
 def _must_env(key: str) -> str:
@@ -94,34 +95,46 @@ def record_send(phone, name):
     )
     db.commit()
 
-def daily_counts(limit_days=60):
+def daily_counts(limit_days=365):
     db = get_db()
     cur = db.execute(
         "SELECT day, COUNT(*) as cnt FROM sent_images GROUP BY day ORDER BY day DESC LIMIT ?",
         (limit_days,)
     )
     rows = cur.fetchall()
+    # للعرض الزمني من الأقدم للأحدث في الرسم البياني
     return list(reversed([(r["day"], r["cnt"]) for r in rows]))
 
-def today_rows():
+def list_days(limit_days=365):
+    """قائمة الأيام تنازليًا (الأحدث أولاً) مع العدّاد."""
     db = get_db()
     cur = db.execute(
-        "SELECT ts, phone, name FROM sent_images WHERE day = ? ORDER BY ts DESC",
-        (today_str(),)
+        "SELECT day, COUNT(*) as cnt FROM sent_images GROUP BY day ORDER BY day DESC LIMIT ?",
+        (limit_days,)
     )
     return cur.fetchall()
 
-# ========= WhatsApp API helpers (أصلي) =========
+def rows_by_day(day):
+    db = get_db()
+    cur = db.execute(
+        "SELECT ts, phone, name FROM sent_images WHERE day = ? ORDER BY ts DESC",
+        (day,)
+    )
+    return cur.fetchall()
+
+def today_rows():
+    return rows_by_day(today_str())
+
+# ========= WhatsApp API helpers =========
 def upload_media(file_path):
     """Uploads media to WhatsApp and returns media_id."""
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/media"
     mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
-    files = {
-        'file': (os.path.basename(file_path), open(file_path, 'rb'), mime_type)
-    }
-    data = {"messaging_product": "whatsapp"}
-    resp = requests.post(url, headers=headers, files=files, data=data)
+    with open(file_path, 'rb') as f:
+        files = {'file': (os.path.basename(file_path), f, mime_type)}
+        data = {"messaging_product": "whatsapp"}
+        resp = requests.post(url, headers=headers, files=files, data=data, timeout=60)
     print("Upload response:", resp.status_code, resp.text)
     resp.raise_for_status()
     return resp.json()["id"]
@@ -158,12 +171,12 @@ def send_template_with_media_id(to_number, media_id, name_param):
             ]
         }
     }
-    resp = requests.post(url, headers=headers, json=payload)
+    resp = requests.post(url, headers=headers, json=payload, timeout=60)
     print("Send response:", resp.status_code, resp.text)
     resp.raise_for_status()
     return resp.json()
 
-# ========= API endpoint (أصلي بدون تغيير) =========
+# ========= API endpoint =========
 @app.route("/send-image", methods=["POST"])
 def send_image():
     """
@@ -182,7 +195,8 @@ def send_image():
     file = request.files["file"]
 
     # Save file temporarily
-    save_path = os.path.join(UPLOAD_FOLDER, file.filename)
+    safe_name = re.sub(r"[^\w\.\-]+", "_", file.filename or "upload.jpg")
+    save_path = os.path.join(UPLOAD_FOLDER, safe_name)
     file.save(save_path)
 
     try:
@@ -203,7 +217,7 @@ def send_image():
         except Exception:
             pass
 
-# ========= Webhook verification (أصلي) =========
+# ========= Webhook verification =========
 @app.route("/webhook", methods=["GET"])
 def verify():
     mode = request.args.get("hub.mode")
@@ -232,7 +246,7 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return wrapper
 
-# ========= Admin Panel (ثيم فاتح + إصلاح الأقواس/الباك-سلاش) =========
+# ========= Admin Panel (ثيم فاتح + صفحات الأيام) =========
 @app.route("/")
 def root_redirect():
     return redirect(url_for("admin_panel"))
@@ -243,6 +257,14 @@ def admin_panel():
     init_db()
     rows = today_rows()
     count_today = len(rows)
+
+    # نعرض رابط "كل الأيام" + أزرار انتقال سريع لأقرب 7 أيام
+    days = list_days(limit_days=7)  # أقرب 7 أيام للانتقال السريع
+    quick_links = "".join(
+        f'<a class="btn btn-sm btn-outline-primary me-2 mb-2" href="{url_for("admin_day", day=d["day"])}">{d["day"]} <span class="badge bg-primary">{d["cnt"]}</span></a>'
+        for d in days
+    )
+
     html = f"""
 <!doctype html>
 <html lang="ar" dir="rtl">
@@ -264,8 +286,13 @@ def admin_panel():
 <body class="p-3 p-md-4">
   <div class="container-fluid">
     <div class="d-flex flex-wrap align-items-center justify-content-between mb-4">
-      <h3 class="m-0">لوحة التحكم</h3>
+      <h3 class="m-0">لوحة التحكم (اليوم)</h3>
       <div class="muted">تاريخ اليوم: {today_str()}</div>
+    </div>
+
+    <div class="d-flex flex-wrap align-items-center mb-3">
+      <a class="btn btn-dark me-2 mb-2" href="{url_for('admin_days')}">قائمة كل الأيام</a>
+      {quick_links}
     </div>
 
     <div class="row g-4">
@@ -357,8 +384,160 @@ loadDaily();
 @requires_auth
 def daily_json():
     init_db()
-    data = [{"day": d, "count": c} for d, c in daily_counts(limit_days=60)]
+    data = [{"day": d, "count": c} for d, c in daily_counts(limit_days=365)]
     return jsonify(data)
+
+# ======== NEW: قائمة كل الأيام ========
+@app.route("/admin/days")
+@requires_auth
+def admin_days():
+    init_db()
+    rows = list_days(limit_days=365)
+    html_rows = "".join(
+        f"""
+        <tr>
+          <td><a href="{url_for('admin_day', day=r['day'])}">{r['day']}</a></td>
+          <td><span class="badge bg-primary">{r['cnt']}</span></td>
+          <td><a class="btn btn-sm btn-outline-secondary" href="{url_for('admin_day_json', day=r['day'])}" target="_blank">JSON</a></td>
+        </tr>
+        """
+        for r in rows
+    ) or '<tr><td colspan="3" class="text-muted">لا توجد بيانات بعد.</td></tr>'
+
+    html = f"""
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <title>قائمة الأيام - WhatsApp Images</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {{ background:#f4f6fb; color:#111827; }}
+    .card {{ background:#ffffff; border:1px solid #e5e7eb; }}
+    .muted {{ color:#6b7280; font-size:0.9rem; }}
+  </style>
+</head>
+<body class="p-3 p-md-4">
+  <div class="container-fluid">
+    <div class="d-flex align-items-center justify-content-between mb-4">
+      <h3 class="m-0">قائمة كل الأيام</h3>
+      <div>
+        <a class="btn btn-dark" href="{url_for('admin_panel')}">عودة إلى اليوم</a>
+      </div>
+    </div>
+
+    <div class="card p-3">
+      <div class="table-responsive">
+        <table class="table table-hover align-middle">
+          <thead class="table-light">
+            <tr>
+              <th style="width:220px;">اليوم</th>
+              <th style="width:120px;">العدد</th>
+              <th>روابط</th>
+            </tr>
+          </thead>
+          <tbody>
+            {html_rows}
+          </tbody>
+        </table>
+      </div>
+      <div class="muted">* اضغط على اليوم لعرض التفاصيل (الأرقام والأسماء) لذلك اليوم.</div>
+    </div>
+  </div>
+</body>
+</html>
+    """
+    return html
+
+# ======== NEW: صفحة يوم واحد بالتفصيل ========
+DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+@app.route("/admin/day/<day>")
+@requires_auth
+def admin_day(day):
+    init_db()
+    if not DAY_RE.match(day):
+        abort(400, description="صيغة اليوم غير صحيحة. استخدم YYYY-MM-DD")
+
+    rows = rows_by_day(day)
+    count_day = len(rows)
+
+    # للانتقال السريع لليوم السابق/التالي (إن وُجد في قاعدة البيانات)
+    all_days = [r["day"] for r in list_days(limit_days=365)]
+    try:
+        idx = all_days.index(day)
+    except ValueError:
+        idx = -1
+
+    prev_link = f'<a class="btn btn-outline-primary me-2" href="{url_for("admin_day", day=all_days[idx-1])}">اليوم السابق</a>' if idx != -1 and idx+1 < len(all_days) else ''
+    next_link = f'<a class="btn btn-outline-primary" href="{url_for("admin_day", day=all_days[idx+1])}">اليوم التالي</a>' if idx > 0 else ''
+
+    html = f"""
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <title>تفاصيل اليوم {day} - WhatsApp Images</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body {{ background:#f4f6fb; color:#111827; }}
+    .card {{ background:#ffffff; border:1px solid #e5e7eb; }}
+    .muted {{ color:#6b7280; font-size:0.9rem; }}
+    .chip {{ background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe; border-radius:999px; padding:.25rem .75rem; display:inline-block; }}
+  </style>
+</head>
+<body class="p-3 p-md-4">
+  <div class="container-fluid">
+    <div class="d-flex flex-wrap align-items-center justify-content-between mb-4">
+      <h3 class="m-0">تفاصيل اليوم: {day}</h3>
+      <div class="d-flex align-items-center">
+        <a class="btn btn-dark me-2" href="{url_for('admin_days')}">قائمة كل الأيام</a>
+        <a class="btn btn-secondary" href="{url_for('admin_panel')}">اليوم الحالي</a>
+      </div>
+    </div>
+
+    <div class="mb-3">
+      {prev_link} {next_link}
+      <a class="btn btn-outline-secondary ms-2" href="{url_for('admin_day_json', day=day)}" target="_blank">JSON</a>
+      <span class="chip ms-2">المجموع: {count_day}</span>
+    </div>
+
+    <div class="card p-3">
+      <div class="table-responsive">
+        <table class="table table-hover align-middle">
+          <thead class="table-light">
+            <tr>
+              <th style="width: 220px;">الوقت</th>
+              <th style="width: 220px;">الرقم</th>
+              <th>الاسم</th>
+            </tr>
+          </thead>
+          <tbody>
+            {''.join(f"<tr><td>{r['ts']}</td><td>{r['phone']}</td><td>{(r['name'] or '')}</td></tr>" for r in rows) or '<tr><td colspan="3" class="text-muted">لا توجد بيانات لهذا اليوم.</td></tr>'}
+          </tbody>
+        </table>
+      </div>
+      <div class="muted">* الأحدث أولاً. يتم تسجيل العملية فقط عند نجاح الإرسال.</div>
+    </div>
+  </div>
+</body>
+</html>
+    """
+    return html
+
+@app.route("/admin/day/<day>.json")
+@requires_auth
+def admin_day_json(day):
+    init_db()
+    if not DAY_RE.match(day):
+        abort(400, description="صيغة اليوم غير صحيحة. استخدم YYYY-MM-DD")
+    rows = rows_by_day(day)
+    data = [
+        {"ts": r["ts"], "phone": r["phone"], "name": r["name"]} for r in rows
+    ]
+    return jsonify({"day": day, "count": len(rows), "rows": data})
 
 # ========= Main =========
 if __name__ == "__main__":
