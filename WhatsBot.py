@@ -9,7 +9,7 @@ import re
 
 from flask import Flask, request, jsonify, Response, g, redirect, url_for, abort
 
-# ========= Environment variables (بدون قيم صلبة في الكود) =========
+# ========= Environment variables =========
 def _must_env(key: str) -> str:
     v = os.getenv(key)
     if not v:
@@ -23,21 +23,15 @@ PHONE_NUMBER_ID  = _must_env("PHONE_NUMBER_ID")
 GRAPH_VERSION    = os.getenv("GRAPH_VERSION", "v21.0")
 TEMPLATE_NAME    = os.getenv("TEMPLATE_NAME", "send_photo")
 
-# Admin panel auth (من البيئة فقط)
 ADMIN_USERNAME   = _must_env("ADMIN_USERNAME")
 ADMIN_PASSWORD   = _must_env("ADMIN_PASSWORD")
 
-# Timezone
 TZ_NAME          = os.getenv("TZ", "Asia/Baghdad")
-
-# Debug switch: فعّل لوجات الويبهوك عند الحاجة فقط
 WEBHOOK_DEBUG    = os.getenv("WEBHOOK_DEBUG", "0") == "1"
 
-# تخزين الملفات المؤقتة
 UPLOAD_FOLDER    = "/tmp/whatsapp_images"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-# مسار القرص الدائم على Render
 DISK_MOUNT_PATH  = os.getenv("DISK_MOUNT_PATH", "/var/data")
 DB_FILE_NAME     = os.getenv("DB_FILE_NAME", "whatsapp_stats.db")
 DB_PATH          = os.path.join(DISK_MOUNT_PATH, DB_FILE_NAME)
@@ -54,14 +48,12 @@ except Exception:
     TZ = None
 
 def now_local():
-    if TZ:
-        return datetime.now(TZ)
-    return datetime.now()
+    return datetime.now(TZ) if TZ else datetime.now()
 
 def today_str():
     return now_local().strftime("%Y-%m-%d")
 
-# ========= Database (SQLite على القرص الدائم) =========
+# ========= Database =========
 def get_db():
     if "db" not in g:
         g.db = sqlite3.connect(DB_PATH, detect_types=sqlite3.PARSE_DECLTYPES, check_same_thread=False)
@@ -80,10 +72,10 @@ def init_db():
         """
         CREATE TABLE IF NOT EXISTS sent_images (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts TEXT NOT NULL,     -- ISO timestamp
-            day TEXT NOT NULL,    -- YYYY-MM-DD
+            ts   TEXT NOT NULL,
+            day  TEXT NOT NULL,
             phone TEXT NOT NULL,
-            name TEXT
+            name  TEXT
         )
         """
     )
@@ -129,7 +121,6 @@ def today_rows():
 
 # ========= WhatsApp API helpers =========
 def upload_media(file_path):
-    """Uploads media to WhatsApp and returns media_id."""
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/media"
     mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
@@ -142,7 +133,6 @@ def upload_media(file_path):
     return resp.json()["id"]
 
 def send_template_with_media_id(to_number, media_id, name_param):
-    """Send approved template with uploaded image."""
     if not name_param:
         name_param = "User"
     url = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages"
@@ -158,18 +148,8 @@ def send_template_with_media_id(to_number, media_id, name_param):
             "name": TEMPLATE_NAME,
             "language": {"code": "en"},
             "components": [
-                {
-                    "type": "header",
-                    "parameters": [
-                        {"type": "image", "image": {"id": media_id}}
-                    ]
-                },
-                {
-                    "type": "body",
-                    "parameters": [
-                        {"type": "text", "text": name_param}
-                    ]
-                }
+                {"type": "header","parameters":[{"type":"image","image":{"id": media_id}}]},
+                {"type": "body","parameters":[{"type":"text","text": name_param}]}
             ]
         }
     }
@@ -178,9 +158,8 @@ def send_template_with_media_id(to_number, media_id, name_param):
     resp.raise_for_status()
     return resp.json()
 
-# ========= Webhook (GET للتحقق + POST للاستقبال مع فلترة) =========
+# ========= Webhook (GET + POST filtered) =========
 def _is_for_this_number(value: dict) -> bool:
-    """يتأكد أن الحدث يخص هذا السيرفر عبر phone_number_id داخل metadata."""
     try:
         meta = value.get("metadata") or {}
         pnid = str(meta.get("phone_number_id") or "").strip()
@@ -190,7 +169,6 @@ def _is_for_this_number(value: dict) -> bool:
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
-    # GET: verification
     if request.method == "GET":
         mode = request.args.get("hub.mode")
         token = request.args.get("hub.verify_token")
@@ -199,47 +177,30 @@ def webhook():
             return challenge, 200
         return "Forbidden", 403
 
-    # POST: استلام الأحداث → فلترة حسب phone_number_id
-    try:
-        payload = request.get_json(force=True, silent=True) or {}
-    except Exception:
-        payload = {}
-
-    if not payload:
-        # نرجّع 200 بدون لوج حتى نمنع إعادة المحاولة
-        return "OK", 200
-
+    # POST
+    payload = request.get_json(force=True, silent=True) or {}
     entries = payload.get("entry", []) or []
-    for entry in entries:
-        changes = entry.get("changes", []) or []
-        for ch in changes:
-            value = ch.get("value") or {}
-            # تجاهل أحداث أرقام أخرى بصمت (بدون أي طباعة)
-            if not _is_for_this_number(value):
-                continue
 
-            # لوج اختياري فقط إذا فعّلت WEBHOOK_DEBUG
+    for entry in entries:
+        for ch in (entry.get("changes", []) or []):
+            value = ch.get("value") or {}
+            if not _is_for_this_number(value):
+                # صامت: لا نطبع شيء نهائياً
+                continue
             if WEBHOOK_DEBUG:
-                if isinstance(value.get("statuses"), list) and value["statuses"]:
+                # طباعة مختصرة عند الحاجة فقط
+                if isinstance(value.get("statuses"), list):
                     for st in value["statuses"]:
                         print(f"[webhook] status id={st.get('id')} status={st.get('status')} ts={st.get('timestamp')}")
-                if isinstance(value.get("messages"), list) and value["messages"]:
+                if isinstance(value.get("messages"), list):
                     for msg in value["messages"]:
-                        print(f"[webhook] inbound msg id={msg.get('id')} from={msg.get('from')} type={msg.get('type')}")
+                        print(f"[webhook] inbound id={msg.get('id')} from={msg.get('from')} type={msg.get('type')}")
 
     return "OK", 200
 
-# ========= API endpoint (الإرسال) =========
+# ========= API endpoint =========
 @app.route("/send-image", methods=["POST"])
 def send_image():
-    """
-    Upload image and send it instantly via template.
-    Required form fields:
-      file: image file
-      to: recipient phone number (international format, no +)
-    Optional:
-      name: name placeholder for template (defaults to "User" if missing/empty)
-    """
     if "file" not in request.files or "to" not in request.form:
         return jsonify(error="Missing file or to"), 400
 
@@ -247,7 +208,6 @@ def send_image():
     user_name = (request.form.get("name") or "").strip()
     file = request.files["file"]
 
-    # Save file temporarily
     safe_name = re.sub(r"[^\w\.\-]+", "_", file.filename or "upload.jpg")
     save_path = os.path.join(UPLOAD_FOLDER, safe_name)
     file.save(save_path)
@@ -255,7 +215,6 @@ def send_image():
     try:
         media_id = upload_media(save_path)
         result = send_template_with_media_id(phone_number, media_id, user_name or "User")
-        # نسجّل فقط عند النجاح
         try:
             init_db()
             record_send(phone_number, user_name or "User")
@@ -270,15 +229,14 @@ def send_image():
         except Exception:
             pass
 
-# ========= Basic Auth (لوحة التحكم) =========
+# ========= Auth =========
 def check_auth(username, password):
     return username == ADMIN_USERNAME and password == ADMIN_PASSWORD
 
 def authenticate():
-    return Response(
-        "Authentication required", 401,
-        {"WWW-Authenticate": 'Basic realm="Admin Panel"'}
-    )
+    return Response("Authentication required", 401,
+                    {"WWW-Authenticate": 'Basic realm="Admin Panel"'}
+                   )
 
 def requires_auth(f):
     @wraps(f)
@@ -289,7 +247,32 @@ def requires_auth(f):
         return f(*args, **kwargs)
     return wrapper
 
-# ========= Admin Panel (ثيم فاتح + صفحات الأيام) =========
+# ========= Admin HTML helpers =========
+def _rows_table_html(rows):
+    if not rows:
+        return '<tr><td colspan="3" class="text-muted">لا توجد بيانات بعد اليوم.</td></tr>'
+    parts = []
+    for r in rows:
+        parts.append(
+            f"<tr><td>{r['ts']}</td><td>{r['phone']}</td><td>{(r['name'] or '')}</td></tr>"
+        )
+    return "".join(parts)
+
+def _days_table_html(days_rows):
+    if not days_rows:
+        return '<tr><td colspan="3" class="text-muted">لا توجد بيانات بعد.</td></tr>'
+    out = []
+    for r in days_rows:
+        link = url_for("admin_day", day=r["day"])
+        jurl = url_for("admin_day_json", day=r["day"])
+        out.append(
+            f'<tr><td><a href="{link}">{r["day"]}</a></td>'
+            f'<td><span class="badge bg-primary">{r["cnt"]}</span></td>'
+            f'<td><a class="btn btn-sm btn-outline-secondary" href="{jurl}" target="_blank">JSON</a></td></tr>'
+        )
+    return "".join(out)
+
+# ========= Admin Panel =========
 @app.route("/")
 def root_redirect():
     return redirect(url_for("admin_panel"))
@@ -300,13 +283,12 @@ def admin_panel():
     init_db()
     rows = today_rows()
     count_today = len(rows)
-
-    # نعرض رابط "كل الأيام" + أزرار انتقال سريع لأقرب 7 أيام
     days = list_days(limit_days=7)
     quick_links = "".join(
         f'<a class="btn btn-sm btn-outline-primary me-2 mb-2" href="{url_for("admin_day", day=d["day"])}">{d["day"]} <span class="badge bg-primary">{d["cnt"]}</span></a>'
         for d in days
     )
+    rows_html = _rows_table_html(rows)
 
     html = f"""
 <!doctype html>
@@ -364,7 +346,7 @@ def admin_panel():
 
       <div class="col-12">
         <div class="card p-3">
-          <div class="d-flex align-items-center justify-content_between">
+          <div class="d-flex align-items-center justify-content-between">
             <div class="muted">عمليات اليوم (الأحدث أولاً)</div>
             <span class="chip">{count_today} عملية</span>
           </div>
@@ -378,7 +360,7 @@ def admin_panel():
                 </tr>
               </thead>
               <tbody>
-                {''.join(f"<tr><td>{r['ts']}</td><td>{r['phone']}</td><td>{(r['name'] or '')}</td></tr>" for r in rows) or '<tr><td colspan="3" class="text-muted">لا توجد بيانات بعد اليوم.</td></tr>'}
+                {rows_html}
               </tbody>
             </table>
           </div>
@@ -399,16 +381,11 @@ async function loadDaily() {{
     type: 'bar',
     data: {{
       labels: labels,
-      datasets: [{{
-        label: 'عدد الصور',
-        data: counts
-      }}]
+      datasets: [{{ label: 'عدد الصور', data: counts }}]
     }},
     options: {{
       responsive: true,
-      plugins: {{
-        legend: {{ display: false }}
-      }},
+      plugins: {{ legend: {{ display: false }} }},
       scales: {{
         x: {{ ticks: {{ color: '#111827' }} }},
         y: {{ ticks: {{ color: '#111827' }}, beginAtZero: true, precision: 0 }}
@@ -430,22 +407,13 @@ def daily_json():
     data = [{"day": d, "count": c} for d, c in daily_counts(limit_days=365)]
     return jsonify(data)
 
-# ======== قائمة كل الأيام ========
+# ======== أيام ========
 @app.route("/admin/days")
 @requires_auth
 def admin_days():
     init_db()
     rows = list_days(limit_days=365)
-    html_rows = "".join(
-        f"""
-        <tr>
-          <td><a href="{url_for('admin_day', day=r['day'])}">{r['day']}</a></td>
-          <td><span class="badge bg-primary">{r['cnt']}</span></td>
-          <td><a class="btn btn-sm btn-outline_secondary" href="{url_for('admin_day_json', day=r['day'])}" target="_blank">JSON</a></td>
-        </tr>
-        """
-        for r in rows
-    ) or '<tr><td colspan="3" class="text-muted">لا توجد بيانات بعد.</td></tr>'
+    html_rows = _days_table_html(rows)
 
     html = f"""
 <!doctype html>
@@ -465,9 +433,7 @@ def admin_days():
   <div class="container-fluid">
     <div class="d-flex align-items-center justify-content-between mb-4">
       <h3 class="m-0">قائمة كل الأيام</h3>
-      <div>
-        <a class="btn btn-dark" href="{url_for('admin_panel')}">عودة إلى اليوم</a>
-      </div>
+      <div><a class="btn btn-dark" href="{url_for('admin_panel')}">عودة إلى اليوم</a></div>
     </div>
 
     <div class="card p-3">
@@ -493,7 +459,7 @@ def admin_days():
     """
     return html
 
-# ======== صفحة يوم واحد بالتفصيل ========
+# ======== تفاصيل يوم ========
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 @app.route("/admin/day/<day>")
@@ -505,9 +471,10 @@ def admin_day(day):
 
     rows = rows_by_day(day)
     count_day = len(rows)
+    rows_html = _rows_table_html(rows)
 
     all_days = [r["day"] for r in list_days(limit_days=365)]
-    prev_link = next_link = ''
+    prev_link = next_link = ""
     if day in all_days:
         idx = all_days.index(day)
         if idx + 1 < len(all_days):
@@ -542,8 +509,8 @@ def admin_day(day):
 
     <div class="mb-3">
       {prev_link} {next_link}
-      <a class="btn btn-outline-secondary ms-2" href="{url_for('admin_day_json', day=day)}" target="_blank">JSON</a>
       <span class="chip ms-2">المجموع: {count_day}</span>
+      <a class="btn btn-outline-secondary ms-2" href="{url_for('admin_day_json', day=day)}" target="_blank">JSON</a>
     </div>
 
     <div class="card p-3">
@@ -557,7 +524,7 @@ def admin_day(day):
             </tr>
           </thead>
           <tbody>
-            {''.join(f"<tr><td>{r['ts']}</td><td>{r['phone']}</td><td>{(r['name'] or '')}</td></tr>" for r in rows) or '<tr><td colspan=\"3\" class=\"text-muted\">لا توجد بيانات لهذا اليوم.</td></tr>'}
+            {rows_html}
           </tbody>
         </table>
       </div>
@@ -576,9 +543,7 @@ def admin_day_json(day):
     if not DAY_RE.match(day):
         abort(400, description="صيغة اليوم غير صحيحة. استخدم YYYY-MM-DD")
     rows = rows_by_day(day)
-    data = [
-        {"ts": r["ts"], "phone": r["phone"], "name": r["name"]} for r in rows
-    ]
+    data = [{"ts": r["ts"], "phone": r["phone"], "name": r["name"]} for r in rows]
     return jsonify({"day": day, "count": len(rows), "rows": data})
 
 # ========= Main =========
@@ -586,4 +551,6 @@ if __name__ == "__main__":
     with app.app_context():
         init_db()
     port = int(os.getenv("PORT", "8000"))
+    # عند النشر على Render استخدم أمر تشغيل مثل:
+    # gunicorn -b 0.0.0.0:$PORT WhatsBot:app
     app.run(host="0.0.0.0", port=port)
