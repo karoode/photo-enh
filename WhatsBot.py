@@ -2,6 +2,7 @@ import os
 import requests
 import mimetypes
 import sqlite3
+import json
 from datetime import datetime
 from functools import wraps
 import re
@@ -176,7 +177,63 @@ def send_template_with_media_id(to_number, media_id, name_param):
     resp.raise_for_status()
     return resp.json()
 
-# ========= API endpoint =========
+# ========= Webhook (GET للتحقق + POST للاستقبال مع فلترة) =========
+def _is_for_this_number(value: dict) -> bool:
+    """يتأكد أن الحدث يخص هذا السيرفر عبر phone_number_id داخل metadata."""
+    try:
+        meta = value.get("metadata") or {}
+        pnid = str(meta.get("phone_number_id") or "").strip()
+        return pnid == str(PHONE_NUMBER_ID).strip()
+    except Exception:
+        return False
+
+@app.route("/webhook", methods=["GET", "POST"])
+def webhook():
+    # GET: verification
+    if request.method == "GET":
+        mode = request.args.get("hub.mode")
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+        if mode == "subscribe" and token == VERIFY_TOKEN:
+            return challenge, 200
+        return "Forbidden", 403
+
+    # POST: استلام الأحداث → فلترة حسب phone_number_id
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+    except Exception:
+        payload = {}
+
+    # إذا ماكو body، رجّع 200 حتى نوقف إعادة المحاولة
+    if not payload:
+        print("[webhook] empty/invalid JSON -> 200")
+        return "OK", 200
+
+    obj = payload.get("object")
+    entries = payload.get("entry", []) or []
+    for entry in entries:
+        changes = entry.get("changes", []) or []
+        for ch in changes:
+            value = ch.get("value") or {}
+            # فلترة قوية: لازم metadata.phone_number_id يطابق
+            if not _is_for_this_number(value):
+                # تجاهل أحداث أرقام أخرى بنفس الـ WABA/APP
+                other_pnid = (value.get("metadata") or {}).get("phone_number_id")
+                print(f"[webhook] ignored event for phone_number_id={other_pnid} (this={PHONE_NUMBER_ID})")
+                continue
+
+            # للوضع التشخيصي فقط: اطبع نوع الحدث باختصار
+            if isinstance(value.get("statuses"), list) and value["statuses"]:
+                for st in value["statuses"]:
+                    print(f"[webhook] status id={st.get('id')} status={st.get('status')} ts={st.get('timestamp')}")
+            if isinstance(value.get("messages"), list) and value["messages"]:
+                for msg in value["messages"]:
+                    print(f"[webhook] inbound msg id={msg.get('id')} from={msg.get('from')} type={msg.get('type')}")
+
+    # دائمًا 200 حتى نمنع 405/إعادة المحاولات
+    return "OK", 200
+
+# ========= API endpoint (الإرسال) =========
 @app.route("/send-image", methods=["POST"])
 def send_image():
     """
@@ -216,16 +273,6 @@ def send_image():
             os.remove(save_path)
         except Exception:
             pass
-
-# ========= Webhook verification =========
-@app.route("/webhook", methods=["GET"])
-def verify():
-    mode = request.args.get("hub.mode")
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return challenge, 200
-    return "Forbidden", 403
 
 # ========= Basic Auth (لوحة التحكم) =========
 def check_auth(username, password):
@@ -463,15 +510,15 @@ def admin_day(day):
     rows = rows_by_day(day)
     count_day = len(rows)
 
-    # للانتقال السريع لليوم السابق/التالي (إن وُجد في قاعدة البيانات)
+    # للانتقال السريع لليوم السابق/التالي (حماية من الأطراف)
     all_days = [r["day"] for r in list_days(limit_days=365)]
-    try:
+    prev_link = next_link = ''
+    if day in all_days:
         idx = all_days.index(day)
-    except ValueError:
-        idx = -1
-
-    prev_link = f'<a class="btn btn-outline-primary me-2" href="{url_for("admin_day", day=all_days[idx-1])}">اليوم السابق</a>' if idx != -1 and idx+1 < len(all_days) else ''
-    next_link = f'<a class="btn btn-outline-primary" href="{url_for("admin_day", day=all_days[idx+1])}">اليوم التالي</a>' if idx > 0 else ''
+        if idx + 1 < len(all_days):
+            prev_link = f'<a class="btn btn-outline-primary me-2" href="{url_for("admin_day", day=all_days[idx+1])}">اليوم السابق</a>'
+        if idx - 1 >= 0:
+            next_link = f'<a class="btn btn-outline-primary" href="{url_for("admin_day", day=all_days[idx-1])}">اليوم التالي</a>'
 
     html = f"""
 <!doctype html>
@@ -543,4 +590,5 @@ def admin_day_json(day):
 if __name__ == "__main__":
     with app.app_context():
         init_db()
-    app.run(host="0.0.0.0", port=8000)
+    port = int(os.getenv("PORT", "8000"))
+    app.run(host="0.0.0.0", port=port)
