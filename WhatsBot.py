@@ -30,6 +30,9 @@ ADMIN_PASSWORD   = _must_env("ADMIN_PASSWORD")
 # Timezone
 TZ_NAME          = os.getenv("TZ", "Asia/Baghdad")
 
+# Debug switch: فعّل لوجات الويبهوك عند الحاجة فقط
+WEBHOOK_DEBUG    = os.getenv("WEBHOOK_DEBUG", "0") == "1"
+
 # تخزين الملفات المؤقتة
 UPLOAD_FOLDER    = "/tmp/whatsapp_images"
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -103,11 +106,9 @@ def daily_counts(limit_days=365):
         (limit_days,)
     )
     rows = cur.fetchall()
-    # للعرض الزمني من الأقدم للأحدث في الرسم البياني
     return list(reversed([(r["day"], r["cnt"]) for r in rows]))
 
 def list_days(limit_days=365):
-    """قائمة الأيام تنازليًا (الأحدث أولاً) مع العدّاد."""
     db = get_db()
     cur = db.execute(
         "SELECT day, COUNT(*) as cnt FROM sent_images GROUP BY day ORDER BY day DESC LIMIT ?",
@@ -204,33 +205,28 @@ def webhook():
     except Exception:
         payload = {}
 
-    # إذا ماكو body، رجّع 200 حتى نوقف إعادة المحاولة
     if not payload:
-        print("[webhook] empty/invalid JSON -> 200")
+        # نرجّع 200 بدون لوج حتى نمنع إعادة المحاولة
         return "OK", 200
 
-    obj = payload.get("object")
     entries = payload.get("entry", []) or []
     for entry in entries:
         changes = entry.get("changes", []) or []
         for ch in changes:
             value = ch.get("value") or {}
-            # فلترة قوية: لازم metadata.phone_number_id يطابق
+            # تجاهل أحداث أرقام أخرى بصمت (بدون أي طباعة)
             if not _is_for_this_number(value):
-                # تجاهل أحداث أرقام أخرى بنفس الـ WABA/APP
-                other_pnid = (value.get("metadata") or {}).get("phone_number_id")
-                print(f"[webhook] ignored event for phone_number_id={other_pnid} (this={PHONE_NUMBER_ID})")
                 continue
 
-            # للوضع التشخيصي فقط: اطبع نوع الحدث باختصار
-            if isinstance(value.get("statuses"), list) and value["statuses"]:
-                for st in value["statuses"]:
-                    print(f"[webhook] status id={st.get('id')} status={st.get('status')} ts={st.get('timestamp')}")
-            if isinstance(value.get("messages"), list) and value["messages"]:
-                for msg in value["messages"]:
-                    print(f"[webhook] inbound msg id={msg.get('id')} from={msg.get('from')} type={msg.get('type')}")
+            # لوج اختياري فقط إذا فعّلت WEBHOOK_DEBUG
+            if WEBHOOK_DEBUG:
+                if isinstance(value.get("statuses"), list) and value["statuses"]:
+                    for st in value["statuses"]:
+                        print(f"[webhook] status id={st.get('id')} status={st.get('status')} ts={st.get('timestamp')}")
+                if isinstance(value.get("messages"), list) and value["messages"]:
+                    for msg in value["messages"]:
+                        print(f"[webhook] inbound msg id={msg.get('id')} from={msg.get('from')} type={msg.get('type')}")
 
-    # دائمًا 200 حتى نمنع 405/إعادة المحاولات
     return "OK", 200
 
 # ========= API endpoint (الإرسال) =========
@@ -306,7 +302,7 @@ def admin_panel():
     count_today = len(rows)
 
     # نعرض رابط "كل الأيام" + أزرار انتقال سريع لأقرب 7 أيام
-    days = list_days(limit_days=7)  # أقرب 7 أيام للانتقال السريع
+    days = list_days(limit_days=7)
     quick_links = "".join(
         f'<a class="btn btn-sm btn-outline-primary me-2 mb-2" href="{url_for("admin_day", day=d["day"])}">{d["day"]} <span class="badge bg-primary">{d["cnt"]}</span></a>'
         for d in days
@@ -368,7 +364,7 @@ def admin_panel():
 
       <div class="col-12">
         <div class="card p-3">
-          <div class="d-flex align-items-center justify-content-between">
+          <div class="d-flex align-items-center justify-content_between">
             <div class="muted">عمليات اليوم (الأحدث أولاً)</div>
             <span class="chip">{count_today} عملية</span>
           </div>
@@ -434,7 +430,7 @@ def daily_json():
     data = [{"day": d, "count": c} for d, c in daily_counts(limit_days=365)]
     return jsonify(data)
 
-# ======== NEW: قائمة كل الأيام ========
+# ======== قائمة كل الأيام ========
 @app.route("/admin/days")
 @requires_auth
 def admin_days():
@@ -445,7 +441,7 @@ def admin_days():
         <tr>
           <td><a href="{url_for('admin_day', day=r['day'])}">{r['day']}</a></td>
           <td><span class="badge bg-primary">{r['cnt']}</span></td>
-          <td><a class="btn btn-sm btn-outline-secondary" href="{url_for('admin_day_json', day=r['day'])}" target="_blank">JSON</a></td>
+          <td><a class="btn btn-sm btn-outline_secondary" href="{url_for('admin_day_json', day=r['day'])}" target="_blank">JSON</a></td>
         </tr>
         """
         for r in rows
@@ -489,7 +485,7 @@ def admin_days():
           </tbody>
         </table>
       </div>
-      <div class="muted">* اضغط على اليوم لعرض التفاصيل (الأرقام والأسماء) لذلك اليوم.</div>
+      <div class="muted">* اضغط على اليوم لعرض التفاصيل.</div>
     </div>
   </div>
 </body>
@@ -497,7 +493,7 @@ def admin_days():
     """
     return html
 
-# ======== NEW: صفحة يوم واحد بالتفصيل ========
+# ======== صفحة يوم واحد بالتفصيل ========
 DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 @app.route("/admin/day/<day>")
@@ -510,7 +506,6 @@ def admin_day(day):
     rows = rows_by_day(day)
     count_day = len(rows)
 
-    # للانتقال السريع لليوم السابق/التالي (حماية من الأطراف)
     all_days = [r["day"] for r in list_days(limit_days=365)]
     prev_link = next_link = ''
     if day in all_days:
@@ -562,7 +557,7 @@ def admin_day(day):
             </tr>
           </thead>
           <tbody>
-            {''.join(f"<tr><td>{r['ts']}</td><td>{r['phone']}</td><td>{(r['name'] or '')}</td></tr>" for r in rows) or '<tr><td colspan="3" class="text-muted">لا توجد بيانات لهذا اليوم.</td></tr>'}
+            {''.join(f"<tr><td>{r['ts']}</td><td>{r['phone']}</td><td>{(r['name'] or '')}</td></tr>" for r in rows) or '<tr><td colspan=\"3\" class=\"text-muted\">لا توجد بيانات لهذا اليوم.</td></tr>'}
           </tbody>
         </table>
       </div>
